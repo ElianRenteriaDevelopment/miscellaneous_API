@@ -13,7 +13,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Deploy
+    - name: Create Environment Variables
       run: |
         if [ ! -f .env ]; then
           echo "Creating .env file..."
