@@ -89,7 +89,11 @@ origins = [
     "https://elianrenteria.github.io",
     "https://elianrenteria.dev",
     "76.176.106.64",
-    "https://modern-spaniel-locally.ngrok-free.app"
+    "https://modern-spaniel-locally.ngrok-free.app",
+    "https://test.checkrx.com",
+    "https://staging.checkrx.com",
+    "https://app.checkrx.com",
+    "https://checkrx.com"
 ]
 #origins = ["*"]
 
