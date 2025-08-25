@@ -15,7 +15,7 @@ import shutil
 from random import randint
 import pandas as pd
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import pillow_heif
 from io import BytesIO
 import base64
@@ -61,6 +61,12 @@ class GenerateNote(BaseModel):
 class GenerateImage(BaseModel):
     prompt: str
     key: str
+
+class WaitlistRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: str
 
 def parse_json_from_string(string_with_json):
     start_index = string_with_json.find('{')
@@ -457,6 +463,43 @@ async def get_image_file(image_name: str):
     else:
         raise HTTPException(status_code=404, detail="Image file not found")
     
+@app.post("/api/waitlist")
+async def add_to_waitlist(request: WaitlistRequest):
+    # Define the static directory path
+    static_dir = "/app/static"
+    
+    # Create the static directory if it doesn't exist
+    if not os.path.exists(static_dir):
+        os.makedirs(static_dir)
+    
+    # Define the waitlist file path
+    waitlist_file = os.path.join(static_dir, "waitlist.txt")
+    
+    try:
+        # Format the fields, using empty string for None values
+        first_name = request.first_name or ""
+        last_name = request.last_name or ""
+        phone = request.phone or ""
+        email = request.email
+        
+        # Create the line with fields separated by spaces
+        line = f"{first_name} {last_name} {phone} {email}\n"
+        
+        # Append the formatted line to the file (creates file if it doesn't exist)
+        with open(waitlist_file, "a") as file:
+            file.write(line)
+        
+        return {
+            "message": "Successfully added to waitlist", 
+            "first_name": request.first_name,
+            "last_name": request.last_name,
+            "phone": request.phone,
+            "email": request.email
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add to waitlist: {str(e)}")
+
 @app.post("/api/generate_image")
 async def generate_image(request: GenerateImage):
     if request.key != api_key:

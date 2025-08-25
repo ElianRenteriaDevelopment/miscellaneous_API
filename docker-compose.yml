@@ -6,6 +6,7 @@ services:
     container_name: myFastApi
     volumes:
       - /home/elianrenteria/photos:/app/photos
+      - /home/elianrenteria:/app/static
     networks:
       - shared-network
     restart: always
