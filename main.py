@@ -600,3 +600,61 @@ async def generate_with_ollama(request: OllamaGenerateRequest):
                 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error communicating with Ollama: {str(e)}")
+
+@app.post("/api/chat")
+async def simple_chat(request: SimpleChatRequest):
+    """Simple chat endpoint using default model (llama3.1:8b)"""
+    try:
+        ollama_request = {
+            "model": OLLAMA_DEFAULT_MODEL,
+            "messages": [{"role": "user", "content": request.message}],
+            "stream": request.stream or False
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=ollama_request
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    "model": OLLAMA_DEFAULT_MODEL,
+                    "response": result.get("message", {}).get("content", ""),
+                    "done": result.get("done", True)
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Failed to get response from Ollama")
+                
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with Ollama: {str(e)}")
+
+@app.post("/api/generate_text")
+async def simple_generate(request: SimpleGenerateRequest):
+    """Simple text generation endpoint using default model (llama3.1:8b)"""
+    try:
+        ollama_request = {
+            "model": OLLAMA_DEFAULT_MODEL,
+            "prompt": request.prompt,
+            "stream": request.stream or False
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=ollama_request
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    "model": OLLAMA_DEFAULT_MODEL,
+                    "response": result.get("response", ""),
+                    "done": result.get("done", True)
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Failed to generate response from Ollama")
+                
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with Ollama: {str(e)}")
