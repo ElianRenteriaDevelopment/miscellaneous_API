@@ -7,6 +7,7 @@ services:
     volumes:
       - /home/elianrenteria/photos:/app/photos
       - /home/elianrenteria:/app/static
+      - /home/elianrenteria/chat_history:/app/chat_history
     networks:
       - shared-network
     extra_hosts:

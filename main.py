@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import os, random, io, csv
 import shutil
+import uuid
+from datetime import datetime
 import zipfile
 from rembg import remove
 from PIL import Image
@@ -33,6 +35,10 @@ generate_image_api_url = os.getenv('GENERATE_IMAGE_API_URL')
 # Ollama configuration
 OLLAMA_BASE_URL = "http://host.docker.internal:11434"  # Default Ollama port
 OLLAMA_DEFAULT_MODEL = "llama3.1:8b"  # Default model to use
+
+# Chat history configuration
+CHAT_HISTORY_DIR = "/app/chat_history"
+os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
 
 app = FastAPI()
 
@@ -89,11 +95,21 @@ class OllamaGenerateRequest(BaseModel):
 
 class SimpleChatRequest(BaseModel):
     message: str
+    conversation_id: Optional[str] = None
     stream: Optional[bool] = False
 
 class SimpleGenerateRequest(BaseModel):
     prompt: str
     stream: Optional[bool] = False
+
+class ConversationInfo(BaseModel):
+    conversation_id: str
+    created_at: str
+    last_updated: str
+    message_count: int
+    title: str
+    last_message_date: Optional[str] = None
+    last_message_time: Optional[str] = None
 
 def parse_json_from_string(string_with_json):
     start_index = string_with_json.find('{')
@@ -105,6 +121,96 @@ def parse_json_from_string(string_with_json):
     json_string = string_with_json[start_index:end_index]
     parsed_json = json.loads(json_string)
     return parsed_json
+
+# Chat history helper functions
+def get_conversation_file_path(conversation_id: str) -> str:
+    """Get the file path for a conversation"""
+    return os.path.join(CHAT_HISTORY_DIR, f"{conversation_id}.json")
+
+def save_conversation(conversation_id: str, messages: list, title: str = None):
+    """Save conversation to JSON file"""
+    conversation_data = {
+        "conversation_id": conversation_id,
+        "created_at": datetime.utcnow().isoformat() if not os.path.exists(get_conversation_file_path(conversation_id)) else None,
+        "last_updated": datetime.utcnow().isoformat(),
+        "title": title or f"Conversation {conversation_id[:8]}",
+        "model": OLLAMA_DEFAULT_MODEL,
+        "messages": messages
+    }
+    
+    # If file exists, preserve creation date and title
+    file_path = get_conversation_file_path(conversation_id)
+    if os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            existing_data = json.load(f)
+            conversation_data["created_at"] = existing_data.get("created_at", conversation_data["created_at"])
+            conversation_data["title"] = existing_data.get("title", conversation_data["title"])
+    
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+
+def load_conversation(conversation_id: str) -> dict:
+    """Load conversation from JSON file"""
+    file_path = get_conversation_file_path(conversation_id)
+    if not os.path.exists(file_path):
+        return {"messages": [], "conversation_id": conversation_id}
+    
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def list_conversations() -> List[ConversationInfo]:
+    """List all conversations"""
+    conversations = []
+    for filename in os.listdir(CHAT_HISTORY_DIR):
+        if filename.endswith('.json'):
+            conversation_id = filename[:-5]  # Remove .json extension
+            try:
+                with open(os.path.join(CHAT_HISTORY_DIR, filename), 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    messages = data.get("messages", [])
+                    
+                    # Get last message timestamp info
+                    last_message_date = None
+                    last_message_time = None
+                    if messages:
+                        last_message = messages[-1]
+                        last_message_date = last_message.get("date")
+                        last_message_time = last_message.get("time")
+                    
+                    conversations.append(ConversationInfo(
+                        conversation_id=conversation_id,
+                        created_at=data.get("created_at", ""),
+                        last_updated=data.get("last_updated", ""),
+                        message_count=len(messages),
+                        title=data.get("title", f"Conversation {conversation_id[:8]}"),
+                        last_message_date=last_message_date,
+                        last_message_time=last_message_time
+                    ))
+            except (json.JSONDecodeError, KeyError):
+                continue
+    
+    # Sort by last_updated descending
+    conversations.sort(key=lambda x: x.last_updated, reverse=True)
+    return conversations
+
+def generate_conversation_title(first_message: str) -> str:
+    """Generate a title from the first message"""
+    # Take first 50 characters and clean it up
+    title = first_message[:50].strip()
+    if len(first_message) > 50:
+        title += "..."
+    return title
+
+def create_timestamped_message(role: str, content: str) -> dict:
+    """Create a message with timestamp information"""
+    now = datetime.utcnow()
+    return {
+        "role": role,
+        "content": content,
+        "timestamp": now.isoformat(),
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S UTC")
+    }
 
 
 # Add CORS middleware
@@ -603,11 +709,24 @@ async def generate_with_ollama(request: OllamaGenerateRequest):
 
 @app.post("/api/chat")
 async def simple_chat(request: SimpleChatRequest):
-    """Simple chat endpoint using default model (llama3.1:8b)"""
+    """Simple chat endpoint with automatic persistent history using default model (llama3.1:8b)"""
     try:
+        # Generate conversation ID if not provided
+        conversation_id = request.conversation_id or str(uuid.uuid4())
+        
+        # Load existing conversation
+        conversation_data = load_conversation(conversation_id)
+        messages = conversation_data.get("messages", [])
+        
+        # Add user message with timestamp
+        user_message = create_timestamped_message("user", request.message)
+        messages.append(user_message)
+        
+        # Prepare Ollama request with full conversation history (filter out timestamps for Ollama)
+        ollama_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
         ollama_request = {
             "model": OLLAMA_DEFAULT_MODEL,
-            "messages": [{"role": "user", "content": request.message}],
+            "messages": ollama_messages,
             "stream": request.stream or False
         }
         
@@ -619,9 +738,28 @@ async def simple_chat(request: SimpleChatRequest):
             
             if response.status_code == 200:
                 result = response.json()
+                assistant_response = result.get("message", {}).get("content", "")
+                
+                # Add assistant message to history with timestamp
+                assistant_message = create_timestamped_message("assistant", assistant_response)
+                messages.append(assistant_message)
+                
+                # Generate title for new conversations
+                title = None
+                if len(messages) == 2:  # First exchange
+                    title = generate_conversation_title(request.message)
+                
+                # Save updated conversation
+                save_conversation(conversation_id, messages, title)
+                
                 return {
+                    "conversation_id": conversation_id,
                     "model": OLLAMA_DEFAULT_MODEL,
-                    "response": result.get("message", {}).get("content", ""),
+                    "response": assistant_response,
+                    "message_count": len(messages),
+                    "timestamp": assistant_message["timestamp"],
+                    "date": assistant_message["date"],
+                    "time": assistant_message["time"],
                     "done": result.get("done", True)
                 }
             else:
@@ -658,3 +796,69 @@ async def simple_generate(request: SimpleGenerateRequest):
                 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error communicating with Ollama: {str(e)}")
+
+# Conversation Management Endpoints
+@app.get("/api/conversations")
+async def get_conversations():
+    """Get list of all conversations"""
+    try:
+        conversations = list_conversations()
+        return {"conversations": conversations}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing conversations: {str(e)}")
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    """Get a specific conversation by ID"""
+    try:
+        conversation_data = load_conversation(conversation_id)
+        if not conversation_data.get("messages"):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return conversation_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading conversation: {str(e)}")
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Delete a specific conversation"""
+    try:
+        file_path = get_conversation_file_path(conversation_id)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        os.remove(file_path)
+        return {"message": f"Conversation {conversation_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting conversation: {str(e)}")
+
+@app.delete("/api/conversations")
+async def clear_all_conversations():
+    """Clear all conversation history"""
+    try:
+        deleted_count = 0
+        for filename in os.listdir(CHAT_HISTORY_DIR):
+            if filename.endswith('.json'):
+                os.remove(os.path.join(CHAT_HISTORY_DIR, filename))
+                deleted_count += 1
+        return {"message": f"Deleted {deleted_count} conversations successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error clearing conversations: {str(e)}")
+
+@app.put("/api/conversations/{conversation_id}/title")
+async def update_conversation_title(conversation_id: str, title: str = Query(...)):
+    """Update conversation title"""
+    try:
+        conversation_data = load_conversation(conversation_id)
+        if not conversation_data.get("messages"):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        save_conversation(conversation_id, conversation_data["messages"], title)
+        return {"message": "Title updated successfully", "title": title}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating title: {str(e)}")
