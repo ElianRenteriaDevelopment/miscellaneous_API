@@ -86,6 +86,7 @@ class ChatMessage(BaseModel):
 class OllamaChatRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
+    conversation_id: Optional[str] = None
     stream: Optional[bool] = False
 
 class OllamaGenerateRequest(BaseModel):
@@ -95,7 +96,6 @@ class OllamaGenerateRequest(BaseModel):
 
 class SimpleChatRequest(BaseModel):
     message: str
-    conversation_id: Optional[str] = None
     stream: Optional[bool] = False
 
 class SimpleGenerateRequest(BaseModel):
@@ -660,12 +660,43 @@ async def get_ollama_models():
 
 @app.post("/api/ollama/chat")
 async def chat_with_ollama(request: OllamaChatRequest):
-    """Chat with Ollama models"""
+    """Advanced chat with Ollama models with persistent history"""
     try:
-        # Convert our request to Ollama format
+        # Generate conversation ID if not provided
+        conversation_id = request.conversation_id or str(uuid.uuid4())
+        
+        # Convert request messages to our internal format with timestamps
+        input_messages = []
+        for msg in request.messages:
+            input_messages.append(create_timestamped_message(msg.role, msg.content))
+        
+        # Load existing conversation if ID provided and messages aren't the full conversation
+        if request.conversation_id:
+            conversation_data = load_conversation(conversation_id)
+            existing_messages = conversation_data.get("messages", [])
+            
+            # Only add new messages that aren't already in history
+            for new_msg in input_messages:
+                # Check if this message is already in history
+                is_duplicate = False
+                for existing_msg in existing_messages:
+                    if (existing_msg.get("role") == new_msg["role"] and 
+                        existing_msg.get("content") == new_msg["content"]):
+                        is_duplicate = True
+                        break
+                
+                if not is_duplicate:
+                    existing_messages.append(new_msg)
+            
+            all_messages = existing_messages
+        else:
+            all_messages = input_messages
+        
+        # Prepare Ollama request (filter out timestamps for Ollama)
+        ollama_messages = [{"role": msg["role"], "content": msg["content"]} for msg in all_messages]
         ollama_request = {
             "model": request.model,
-            "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+            "messages": ollama_messages,
             "stream": request.stream or False
         }
         
@@ -676,7 +707,35 @@ async def chat_with_ollama(request: OllamaChatRequest):
             )
             
             if response.status_code == 200:
-                return response.json()
+                result = response.json()
+                assistant_response = result.get("message", {}).get("content", "")
+                
+                # Add assistant response to history with timestamp
+                assistant_message = create_timestamped_message("assistant", assistant_response)
+                all_messages.append(assistant_message)
+                
+                # Generate title for new conversations
+                title = None
+                if not request.conversation_id and len(all_messages) >= 2:
+                    # Use the first user message for title
+                    first_user_msg = next((msg for msg in all_messages if msg["role"] == "user"), None)
+                    if first_user_msg:
+                        title = generate_conversation_title(first_user_msg["content"])
+                
+                # Save updated conversation
+                save_conversation(conversation_id, all_messages, title)
+                
+                # Return the original Ollama response plus our metadata
+                response_data = result.copy()
+                response_data.update({
+                    "conversation_id": conversation_id,
+                    "message_count": len(all_messages),
+                    "timestamp": assistant_message["timestamp"],
+                    "date": assistant_message["date"],
+                    "time": assistant_message["time"]
+                })
+                
+                return response_data
             else:
                 raise HTTPException(status_code=500, detail="Failed to get response from Ollama")
                 
@@ -709,24 +768,11 @@ async def generate_with_ollama(request: OllamaGenerateRequest):
 
 @app.post("/api/chat")
 async def simple_chat(request: SimpleChatRequest):
-    """Simple chat endpoint with automatic persistent history using default model (llama3.1:8b)"""
+    """Simple chat endpoint using default model (llama3.1:8b) - no history"""
     try:
-        # Generate conversation ID if not provided
-        conversation_id = request.conversation_id or str(uuid.uuid4())
-        
-        # Load existing conversation
-        conversation_data = load_conversation(conversation_id)
-        messages = conversation_data.get("messages", [])
-        
-        # Add user message with timestamp
-        user_message = create_timestamped_message("user", request.message)
-        messages.append(user_message)
-        
-        # Prepare Ollama request with full conversation history (filter out timestamps for Ollama)
-        ollama_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
         ollama_request = {
             "model": OLLAMA_DEFAULT_MODEL,
-            "messages": ollama_messages,
+            "messages": [{"role": "user", "content": request.message}],
             "stream": request.stream or False
         }
         
@@ -738,28 +784,9 @@ async def simple_chat(request: SimpleChatRequest):
             
             if response.status_code == 200:
                 result = response.json()
-                assistant_response = result.get("message", {}).get("content", "")
-                
-                # Add assistant message to history with timestamp
-                assistant_message = create_timestamped_message("assistant", assistant_response)
-                messages.append(assistant_message)
-                
-                # Generate title for new conversations
-                title = None
-                if len(messages) == 2:  # First exchange
-                    title = generate_conversation_title(request.message)
-                
-                # Save updated conversation
-                save_conversation(conversation_id, messages, title)
-                
                 return {
-                    "conversation_id": conversation_id,
                     "model": OLLAMA_DEFAULT_MODEL,
-                    "response": assistant_response,
-                    "message_count": len(messages),
-                    "timestamp": assistant_message["timestamp"],
-                    "date": assistant_message["date"],
-                    "time": assistant_message["time"],
+                    "response": result.get("message", {}).get("content", ""),
                     "done": result.get("done", True)
                 }
             else:
