@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import requests
+import httpx
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os, random, io, csv
@@ -28,6 +29,10 @@ whatbeats_api_url = os.getenv('WHATBEATS_API_URL')
 api_key = os.getenv('GENERATE_API_KEY')
 generate_note_prompt = os.getenv('GENERATE_NOTE_PROMPT')
 generate_image_api_url = os.getenv('GENERATE_IMAGE_API_URL')
+
+# Ollama configuration
+OLLAMA_BASE_URL = "http://host.docker.internal:11434"  # Default Ollama port
+OLLAMA_DEFAULT_MODEL = "llama3.1:8b"  # Default model to use
 
 app = FastAPI()
 
@@ -67,6 +72,28 @@ class WaitlistRequest(BaseModel):
     last_name: Optional[str] = None
     phone: Optional[str] = None
     email: str
+
+class ChatMessage(BaseModel):
+    role: str  # "user", "assistant", "system"
+    content: str
+
+class OllamaChatRequest(BaseModel):
+    model: str
+    messages: List[ChatMessage]
+    stream: Optional[bool] = False
+
+class OllamaGenerateRequest(BaseModel):
+    model: str
+    prompt: str
+    stream: Optional[bool] = False
+
+class SimpleChatRequest(BaseModel):
+    message: str
+    stream: Optional[bool] = False
+
+class SimpleGenerateRequest(BaseModel):
+    prompt: str
+    stream: Optional[bool] = False
 
 def parse_json_from_string(string_with_json):
     start_index = string_with_json.find('{')
@@ -511,3 +538,65 @@ async def generate_image(request: GenerateImage):
     image = requests.post(generate_image_api_url+"/generate", json={"prompt": request.prompt})
     response = requests.get(generate_image_api_url+image.json()["image_url"])
     return StreamingResponse(BytesIO(response.content), media_type="image/png")
+
+@app.get("/api/ollama/models")
+async def get_ollama_models():
+    """Get list of available Ollama models"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            if response.status_code == 200:
+                return response.json()
+            else:
+                raise HTTPException(status_code=500, detail="Failed to fetch models from Ollama")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error connecting to Ollama: {str(e)}")
+
+@app.post("/api/ollama/chat")
+async def chat_with_ollama(request: OllamaChatRequest):
+    """Chat with Ollama models"""
+    try:
+        # Convert our request to Ollama format
+        ollama_request = {
+            "model": request.model,
+            "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+            "stream": request.stream or False
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=ollama_request
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                raise HTTPException(status_code=500, detail="Failed to get response from Ollama")
+                
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with Ollama: {str(e)}")
+
+@app.post("/api/ollama/generate")
+async def generate_with_ollama(request: OllamaGenerateRequest):
+    """Generate text with Ollama models"""
+    try:
+        ollama_request = {
+            "model": request.model,
+            "prompt": request.prompt,
+            "stream": request.stream or False
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=ollama_request
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                raise HTTPException(status_code=500, detail="Failed to generate response from Ollama")
+                
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with Ollama: {str(e)}")
