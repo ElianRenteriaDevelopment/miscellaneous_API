@@ -707,35 +707,78 @@ async def chat_with_ollama(request: OllamaChatRequest):
             )
             
             if response.status_code == 200:
-                result = response.json()
-                assistant_response = result.get("message", {}).get("content", "")
-                
-                # Add assistant response to history with timestamp
-                assistant_message = create_timestamped_message("assistant", assistant_response)
-                all_messages.append(assistant_message)
-                
-                # Generate title for new conversations
-                title = None
-                if not request.conversation_id and len(all_messages) >= 2:
-                    # Use the first user message for title
-                    first_user_msg = next((msg for msg in all_messages if msg["role"] == "user"), None)
-                    if first_user_msg:
-                        title = generate_conversation_title(first_user_msg["content"])
-                
-                # Save updated conversation
-                save_conversation(conversation_id, all_messages, title)
-                
-                # Return the original Ollama response plus our metadata
-                response_data = result.copy()
-                response_data.update({
-                    "conversation_id": conversation_id,
-                    "message_count": len(all_messages),
-                    "timestamp": assistant_message["timestamp"],
-                    "date": assistant_message["date"],
-                    "time": assistant_message["time"]
-                })
-                
-                return response_data
+                if request.stream:
+                    # Handle streaming response - for advanced chat, we'll collect the full response
+                    # before saving to history, but still stream to client
+                    full_response = ""
+                    
+                    async def generate_stream():
+                        nonlocal full_response
+                        async for line in response.aiter_lines():
+                            if line.strip():
+                                try:
+                                    chunk = json.loads(line)
+                                    # Accumulate the response content
+                                    if chunk.get("message", {}).get("content"):
+                                        full_response += chunk["message"]["content"]
+                                    
+                                    # Forward the chunk as-is for streaming
+                                    yield f"data: {json.dumps(chunk)}\n\n"
+                                    
+                                    if chunk.get("done", False):
+                                        # Save conversation after streaming is complete
+                                        assistant_message = create_timestamped_message("assistant", full_response)
+                                        all_messages.append(assistant_message)
+                                        
+                                        # Generate title for new conversations
+                                        title = None
+                                        if not request.conversation_id and len(all_messages) >= 2:
+                                            first_user_msg = next((msg for msg in all_messages if msg["role"] == "user"), None)
+                                            if first_user_msg:
+                                                title = generate_conversation_title(first_user_msg["content"])
+                                        
+                                        # Save updated conversation
+                                        save_conversation(conversation_id, all_messages, title)
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
+                    
+                    return StreamingResponse(
+                        generate_stream(),
+                        media_type="text/plain",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+                    )
+                else:
+                    # Handle non-streaming response
+                    result = response.json()
+                    assistant_response = result.get("message", {}).get("content", "")
+                    
+                    # Add assistant response to history with timestamp
+                    assistant_message = create_timestamped_message("assistant", assistant_response)
+                    all_messages.append(assistant_message)
+                    
+                    # Generate title for new conversations
+                    title = None
+                    if not request.conversation_id and len(all_messages) >= 2:
+                        # Use the first user message for title
+                        first_user_msg = next((msg for msg in all_messages if msg["role"] == "user"), None)
+                        if first_user_msg:
+                            title = generate_conversation_title(first_user_msg["content"])
+                    
+                    # Save updated conversation
+                    save_conversation(conversation_id, all_messages, title)
+                    
+                    # Return the original Ollama response plus our metadata
+                    response_data = result.copy()
+                    response_data.update({
+                        "conversation_id": conversation_id,
+                        "message_count": len(all_messages),
+                        "timestamp": assistant_message["timestamp"],
+                        "date": assistant_message["date"],
+                        "time": assistant_message["time"]
+                    })
+                    
+                    return response_data
             else:
                 raise HTTPException(status_code=500, detail="Failed to get response from Ollama")
                 
@@ -759,7 +802,28 @@ async def generate_with_ollama(request: OllamaGenerateRequest):
             )
             
             if response.status_code == 200:
-                return response.json()
+                if request.stream:
+                    # Handle streaming response
+                    async def generate_stream():
+                        async for line in response.aiter_lines():
+                            if line.strip():
+                                try:
+                                    chunk = json.loads(line)
+                                    # Forward the chunk as-is for streaming
+                                    yield f"data: {json.dumps(chunk)}\n\n"
+                                    if chunk.get("done", False):
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
+                    
+                    return StreamingResponse(
+                        generate_stream(),
+                        media_type="text/plain",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+                    )
+                else:
+                    # Handle non-streaming response
+                    return response.json()
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate response from Ollama")
                 
@@ -783,12 +847,33 @@ async def simple_chat(request: SimpleChatRequest):
             )
             
             if response.status_code == 200:
-                result = response.json()
-                return {
-                    "model": OLLAMA_DEFAULT_MODEL,
-                    "response": result.get("message", {}).get("content", ""),
-                    "done": result.get("done", True)
-                }
+                if request.stream:
+                    # Handle streaming response
+                    async def generate_stream():
+                        async for line in response.aiter_lines():
+                            if line.strip():
+                                try:
+                                    chunk = json.loads(line)
+                                    # Forward the chunk as-is for streaming
+                                    yield f"data: {json.dumps(chunk)}\n\n"
+                                    if chunk.get("done", False):
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
+                    
+                    return StreamingResponse(
+                        generate_stream(),
+                        media_type="text/plain",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+                    )
+                else:
+                    # Handle non-streaming response
+                    result = response.json()
+                    return {
+                        "model": OLLAMA_DEFAULT_MODEL,
+                        "response": result.get("message", {}).get("content", ""),
+                        "done": result.get("done", True)
+                    }
             else:
                 raise HTTPException(status_code=500, detail="Failed to get response from Ollama")
                 
@@ -812,12 +897,33 @@ async def simple_generate(request: SimpleGenerateRequest):
             )
             
             if response.status_code == 200:
-                result = response.json()
-                return {
-                    "model": OLLAMA_DEFAULT_MODEL,
-                    "response": result.get("response", ""),
-                    "done": result.get("done", True)
-                }
+                if request.stream:
+                    # Handle streaming response
+                    async def generate_stream():
+                        async for line in response.aiter_lines():
+                            if line.strip():
+                                try:
+                                    chunk = json.loads(line)
+                                    # Forward the chunk as-is for streaming
+                                    yield f"data: {json.dumps(chunk)}\n\n"
+                                    if chunk.get("done", False):
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
+                    
+                    return StreamingResponse(
+                        generate_stream(),
+                        media_type="text/plain",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+                    )
+                else:
+                    # Handle non-streaming response
+                    result = response.json()
+                    return {
+                        "model": OLLAMA_DEFAULT_MODEL,
+                        "response": result.get("response", ""),
+                        "done": result.get("done", True)
+                    }
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate response from Ollama")
                 
